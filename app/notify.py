@@ -97,7 +97,12 @@ def has_channels() -> bool:
 
 # ---------------------------------------------------------------- 新标讯推送
 
-def push_new_matches(min_score: float = 60) -> int:
+def push_new_matches(min_score: float | None = None) -> int:
+    if min_score is None:
+        try:
+            min_score = float(db.all_settings().get("notify_min_score") or 50)
+        except (TypeError, ValueError):
+            min_score = 50.0
     rows = db.q(
         "SELECT m.id, m.score, m.level, c.short_name, c.name AS cname, n.title, n.deadline, n.budget, n.region "
         "FROM matches m JOIN notices n ON n.id = m.notice_id JOIN companies c ON c.id = m.company_id "

@@ -63,7 +63,13 @@ def configure() -> None:
         return
     s = db.all_settings()
     hours = ",".join(x.strip() for x in str(s.get("crawl_hours") or "8").split(",") if x.strip().isdigit()) or "8"
-    _sched.add_job(_safe(_crawl, "crawl"), CronTrigger(hour=hours, minute=5, timezone=TZ), id="crawl", replace_existing=True, max_instances=1, coalesce=True)
+    try:
+        step = int(s.get("crawl_minute_step") or 15)
+    except (TypeError, ValueError):
+        step = 15
+    step = max(1, min(step, 60))
+    minutes = ",".join(str(m) for m in range(0, 60, step))
+    _sched.add_job(_safe(_crawl, "crawl"), CronTrigger(hour=hours, minute=minutes, timezone=TZ), id="crawl", replace_existing=True, max_instances=1, coalesce=True)
     h, m = _hm(s.get("digest_time"), "08:30")
     _sched.add_job(_safe(notify.daily_digest, "digest"), CronTrigger(hour=h, minute=m, timezone=TZ), id="digest", replace_existing=True)
     h, m = _hm(s.get("reminder_time"), "09:00")

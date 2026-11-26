@@ -317,7 +317,14 @@ def collect_search(
     for kw in keywords[:limit]:
         for page in range(1, pages + 1):
             url = search_url(kw, start, end, page, bid_type)
-            html = fetcher.get(url, interval=interval)
+            try:
+                html = fetcher.get(url, interval=interval)
+            except StopCrawl:
+                raise
+            except Exception as e:  # noqa: BLE001
+                # 该站搜索限频极严，超时/被拦是常态：记一笔跳到下一个词，不要整轮失败
+                log(f"[搜索「{kw}」] 第{page}页抓取失败：{type(e).__name__}，跳过这个词")
+                break
             items, total = parse_search(html)
             log(f"[搜索「{kw}」] 第{page}页 {len(items)} 条（共 {total} 条）")
             for it in items:

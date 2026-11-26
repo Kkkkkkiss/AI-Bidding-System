@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Body, Depends, HTTPException
 
 from .. import db, jobs, llm, matching
-from ..config import now_str
+from ..config import SNAPSHOT_DIR, now_str
 from ..crawler import ccgp, runner
 from ..crawler.base import RobotsDisallowed, StopCrawl
 from ..extract import TYPE_LABELS
@@ -14,16 +14,7 @@ from . import must, pick
 router = APIRouter(prefix="/api", tags=["notices"])
 
 
-def _match_out(m: dict | None) -> dict | None:
-    if not m:
-        return None
-    m["reasons"] = db.jload(m.pop("reasons_json", "[]"), [])
-    m["missing"] = db.jload(m.pop("missing_json", "[]"), [])
-    return m
-
-
-@router.get("/notices")
-def list_notices(
+def _notice_query(
     company_id: int = 0,
     only_matched: int = 1,
     level: str = "",
@@ -34,12 +25,8 @@ def list_notices(
     date_from: str = "",
     date_to: str = "",
     hide_expired: int = 0,
-    sort: str = "score",
-    page: int = 1,
-    size: int = 30,
-    user: dict = Depends(current_user),
-):
-    size = max(5, min(100, size))
+) -> tuple[str, list[str], list]:
+    """列表、批量删除、按筛选清空共用同一套筛选条件，保证「看到的就是删掉的」。"""
     where = ["n.dup_of IS NULL"]
     params: list = []
     join = ""
@@ -74,6 +61,67 @@ def list_notices(
     if hide_expired:
         where.append("(n.deadline = '' OR n.deadline >= ?)")
         params.append(now_str()[:16])
+    return join, where, params
+
+
+def _delete_notice_ids(ids: list[int], user: dict) -> dict:
+    """删除公告、对应匹配记录和原文快照。已被投标项目引用的跳过，避免项目丢来源。"""
+    ids = sorted({int(i) for i in ids})
+    if not ids:
+        return {"deleted": 0, "skipped": 0, "skipped_ids": []}
+    ph = ",".join("?" * len(ids))
+    used = {
+        r["notice_id"]
+        for r in db.q(f"SELECT DISTINCT notice_id FROM projects WHERE notice_id IN ({ph})", ids)
+        if r["notice_id"]
+    }
+    targets = [i for i in ids if i not in used]
+    deleted = 0
+    if targets:
+        tph = ",".join("?" * len(targets))
+        deleted = int(db.scalar(f"SELECT COUNT(*) FROM notices WHERE id IN ({tph})", targets) or 0)
+        if deleted:
+            db.ex(f"DELETE FROM matches WHERE notice_id IN ({tph})", targets)
+            db.ex(f"UPDATE notices SET dup_of = NULL WHERE dup_of IN ({tph})", targets)
+            db.ex(f"DELETE FROM notices WHERE id IN ({tph})", targets)
+            for i in targets:
+                try:
+                    (SNAPSHOT_DIR / f"{i}.html").unlink(missing_ok=True)
+                except OSError:
+                    pass
+    db.audit(user, "删除公告", f"删除 {deleted} 条，跳过已立项 {len(used)} 条")
+    return {"deleted": deleted, "skipped": len(used), "skipped_ids": sorted(used)}
+
+
+def _match_out(m: dict | None) -> dict | None:
+    if not m:
+        return None
+    m["reasons"] = db.jload(m.pop("reasons_json", "[]"), [])
+    m["missing"] = db.jload(m.pop("missing_json", "[]"), [])
+    return m
+
+
+@router.get("/notices")
+def list_notices(
+    company_id: int = 0,
+    only_matched: int = 1,
+    level: str = "",
+    status: str = "",
+    notice_type: str = "",
+    region: str = "",
+    q: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    hide_expired: int = 0,
+    sort: str = "score",
+    page: int = 1,
+    size: int = 30,
+    user: dict = Depends(current_user),
+):
+    size = max(5, min(100, size))
+    join, where, params = _notice_query(
+        company_id, only_matched, level, status, notice_type, region, q, date_from, date_to, hide_expired
+    )
     order = {
         "score": "m.score DESC, n.publish_time DESC" if join else "n.publish_time DESC",
         "publish": "n.publish_time DESC",
@@ -258,6 +306,45 @@ def ai_check_match(mid: int, user: dict = Depends(current_user)):
 SOURCE_FIELDS = ["name", "description", "enabled"]
 
 
+@router.post("/notices/bulk_delete")
+def bulk_delete_notices(payload: dict = Body(...), user: dict = Depends(require("admin", "manager"))):
+    """按选中的 id 批量删除公告。"""
+    raw = payload.get("ids") or []
+    if not isinstance(raw, list):
+        raise HTTPException(400, "ids 需要是数组")
+    try:
+        ids = [int(x) for x in raw]
+    except (TypeError, ValueError):
+        raise HTTPException(400, "ids 里有非法值")
+    if not ids:
+        raise HTTPException(400, "没有选中任何公告")
+    if len(ids) > 5000:
+        raise HTTPException(400, "一次最多删除 5000 条，请分批操作")
+    return _delete_notice_ids(ids, user)
+
+
+@router.post("/notices/purge")
+def purge_notices(payload: dict = Body(...), user: dict = Depends(require("admin"))):
+    """按当前筛选条件整批清空（只删筛选结果，不动已立项的）。"""
+    f = payload.get("filter") or {}
+    if not isinstance(f, dict):
+        raise HTTPException(400, "filter 需要是对象")
+    join, where, params = _notice_query(
+        company_id=int(f.get("company_id") or 0),
+        only_matched=int(f.get("only_matched") or 0),
+        level=(f.get("level") or ""),
+        status=(f.get("status") or ""),
+        notice_type=(f.get("notice_type") or ""),
+        region=(f.get("region") or ""),
+        q=(f.get("q") or ""),
+        date_from=(f.get("date_from") or ""),
+        date_to=(f.get("date_to") or ""),
+        hide_expired=int(f.get("hide_expired") or 0),
+    )
+    rows = db.q(f"SELECT DISTINCT n.id FROM notices n {join} WHERE {' AND '.join(where)} LIMIT 20000", params)
+    return _delete_notice_ids([r["id"] for r in rows], user)
+
+
 @router.get("/sources")
 def list_sources(user: dict = Depends(current_user)):
     rows = db.q("SELECT * FROM sources ORDER BY id")
@@ -313,6 +400,13 @@ def test_source(payload: dict = Body(...), user: dict = Depends(require("admin")
         raise HTTPException(429, str(e)) from e
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"测试失败：{type(e).__name__} {e}") from e
+
+
+@router.post("/sources/{sid}/test")
+def test_source_now(sid: int, user: dict = Depends(require("admin", "manager"))):
+    """测试连接：只发一两个请求，确认这个来源现在还能不能采到东西。"""
+    src = must(db.get("sources", sid), "来源")
+    return runner.test_source(src)
 
 
 @router.post("/sources/{sid}/run")

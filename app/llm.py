@@ -20,7 +20,10 @@ from . import db
 from .config import now_str
 
 PRESETS: dict[str, dict[str, str]] = {
-    "deepseek": {"label": "DeepSeek", "provider": "openai", "base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat"},
+    # 模型名必须填接口真实 id（deepseek-flash / deepseek-v4-pro），
+    # 不能填控制台里的展示名（如「DeepSeek V4.1 Flash 1017」），否则报 invalid_request_error。
+    "deepseek": {"label": "DeepSeek V4.1 Flash（型号填 deepseek-flash）", "provider": "openai", "base_url": "https://api.deepseek.com/v1", "model": "deepseek-flash"},
+    "deepseek_v4_pro": {"label": "DeepSeek V4 Pro（型号填 deepseek-v4-pro）", "provider": "openai", "base_url": "https://api.deepseek.com/v1", "model": "deepseek-v4-pro"},
     "qwen": {"label": "通义千问（阿里云百炼）", "provider": "openai", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-plus"},
     "doubao": {"label": "豆包（火山方舟）", "provider": "openai", "base_url": "https://ark.cn-beijing.volces.com/api/v3", "model": "填写推理接入点ID或模型名"},
     "zhipu": {"label": "智谱 GLM", "provider": "openai", "base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4-plus"},

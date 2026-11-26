@@ -140,28 +140,30 @@
 
   App.routes.companies = function (main) {
     var box = h("div");
-    main.appendChild(h("div", { class: "row mb" }, h("p", { class: "muted", style: { margin: 0 } }, "一个主体就是一家可以独立投标的公司。集团可以添加多家子公司，资料互相隔离。订阅决定系统每天给这个主体推荐哪些标讯。"), h("span", { class: "spacer" }),
-      App.can("manager", "sales") ? h("button", { class: "btn primary", on: { click: function () { editCompany(null); } } }, "添加主体") : null));
+    main.appendChild(h("div", { class: "row mb" }, h("p", { class: "muted", style: { margin: 0 } }, "这里维护你自己公司的基本信息（投标函、授权书会用这些信息自动填写）和抓取关键词（决定每天给你推荐哪些标讯）。一家公司填一份就够了。"), h("span", { class: "spacer" }),
+      h("button", { class: "btn primary", id: "add-company-btn", on: { click: function () { editCompany(null); } } }, "添加公司")));
     main.appendChild(box);
     function load() {
       App.loadCompanies().then(function (list) {
         App.clear(box);
-        if (!list.length) { box.appendChild(App.empty("还没有投标主体", "先添加你们公司的基本信息，投标函、授权书等格式文件会自动用这些信息填写")); return; }
+        var addBtn = document.getElementById("add-company-btn");
+        if (addBtn) addBtn.style.display = list.length ? "none" : "";
+        if (!list.length) { box.appendChild(App.empty("还没有公司信息", "先填一下你们公司的基本信息，投标函、授权书等格式文件会自动用这些信息填写")); return; }
         list.forEach(function (c) { box.appendChild(companyPanel(c)); });
       });
     }
     function companyPanel(c) {
       var subsBox = h("div");
       var p = App.panel(c.name, h("div", null,
-        h("dl", { class: "kv mb" }, [["法定代表人", c.legal_person], ["统一社会信用代码", c.credit_code], ["注册资本", c.reg_capital], ["地址", c.address], ["联系人", [c.contact_person, c.contact_phone].filter(Boolean).join(" ")], ["中小企业", c.is_sme ? "是" : "否"], ["资料库", c.library_count + " 条"]].filter(function (x) { return x[1]; }).map(function (x) { return [h("dt", null, x[0]), h("dd", null, x[1])]; })),
-        h("div", { class: "row mb" }, h("b", null, "订阅（" + c.subscription_count + "）"), h("span", { class: "spacer" }),
-          h("button", { class: "btn sm", on: { click: function () { editSub(c, null); } } }, "新增订阅"),
+        h("dl", { class: "kv mb" }, [["法定代表人", c.legal_person], ["统一社会信用代码", c.credit_code], ["注册资本", c.reg_capital], ["地址", c.address], ["联系人", [c.contact_person, c.contact_phone].filter(Boolean).join(" ")], ["中小企业", c.is_sme ? "是" : "否"]].filter(function (x) { return x[1]; }).map(function (x) { return [h("dt", null, x[0]), h("dd", null, x[1])]; })),
+        h("div", { class: "row mb" }, h("b", null, "抓取关键词（" + c.subscription_count + "）"), h("span", { class: "spacer" }),
+          h("button", { class: "btn sm", on: { click: function () { editSub(c, null); } } }, "新增关键词"),
           h("button", { class: "btn sm", title: "订阅改动后，对最近 7 天已采集的公告重新匹配", on: { click: function (e) {
             var b = e.currentTarget; App.busy(b, true, "匹配中");
             App.post("/api/subscriptions/rematch", { days: 7 }).then(function (r) { App.busy(b, false); App.toast("扫描 " + r.scanned + " 条公告，匹配 " + r.matched + " 条", "ok"); }, function () { App.busy(b, false); });
           } } }, "用最近 7 天公告重新匹配")),
         subsBox),
-        h("div", { class: "row" }, h("button", { class: "btn sm", on: { click: function () { editCompany(c); } } }, "编辑信息"), h("a", { class: "btn sm", href: "#/library" }, "资料库")));
+        h("div", { class: "row" }, h("button", { class: "btn sm", on: { click: function () { editCompany(c); } } }, "编辑信息")));
       App.get("/api/subscriptions?company_id=" + c.id).then(function (subs) {
         subsBox.appendChild(App.table([
           { label: "名称", render: function (s) { return h("a", { href: "#", on: { click: function (e) { e.preventDefault(); editSub(c, s); } } }, s.name); } },
@@ -171,38 +173,74 @@
           { label: "预算（万元）", render: function (s) { return (s.budget_min || s.budget_max) ? (s.budget_min || 0) + " ~ " + (s.budget_max || "不限") : "不限"; } },
           { label: "状态", render: function (s) { return h("span", { class: "tag " + (s.enabled ? "ok" : "") }, s.enabled ? "启用" : "停用"); } },
           { label: "", render: function (s) { return h("button", { class: "btn sm", on: { click: function () { previewSub(s); } } }, "预览效果"); } }
-        ], subs, { empty: "还没有订阅", emptyHint: "没有订阅时不会推荐任何标讯" }));
+        ], subs, { empty: "还没有关键词", emptyHint: "没有关键词就不会给你推荐任何标讯" }));
       });
       return p;
     }
     function editCompany(c) {
       var f = App.form(COMPANY_FIELDS, c || {});
       App.modal({ title: c ? "编辑主体" : "添加投标主体", wide: true, body: f.el, buttons: [
-        c && App.can() ? { text: "删除主体", danger: true, onClick: function () { return App.confirm("删除主体「" + c.name + "」及其资料库、订阅？有投标项目的主体不能删除。", "删除").then(function (ok) { if (ok) return App.del("/api/companies/" + c.id).then(load); return false; }); } } : null,
+        c && App.can() ? { text: "删除主体", danger: true, onClick: function () { return deleteCompany(c, load); } } : null,
         { text: "取消" },
         { text: "保存", primary: true, onClick: function () {
           var pr = c ? App.put("/api/companies/" + c.id, f.values()) : App.post("/api/companies", f.values());
           return pr.then(function () { App.toast("已保存", "ok"); load(); });
         } }].filter(Boolean) });
     }
+    function deleteCompany(c, reload) {
+      function step(force) {
+        var note = force
+          ? "最后确认：删除主体「" + c.name + "」，连同它下面的全部投标项目、标书、招标文件解析记录一起删掉。这个操作不可恢复。"
+          : "删除主体「" + c.name + "」及其资料库、订阅、平台账号记录？";
+        return App.confirm(note, force ? "全部删除" : "删除").then(function (ok) {
+          if (!ok) return false;
+          return App.del("/api/companies/" + c.id + (force ? "?force=1" : ""), { quiet: true }).then(function (r) {
+            App.toast("已删除主体「" + c.name + "」" + (r && r.projects_deleted ? "，连带 " + r.projects_deleted + " 个投标项目" : ""), "ok");
+            reload();
+            return true;
+          }, function (e) {
+            var msg = (e && e.message) || "删除失败";
+            if (!force && msg.indexOf("投标项目") >= 0) {
+              return App.confirm(msg + "\n\n是否连同这些项目和标书一起删除？", "一起删除").then(function (ok2) {
+                return ok2 ? step(true) : false;
+              });
+            }
+            App.toast(msg, "err");
+            return false;
+          });
+        });
+      }
+      return step(false);
+    }
     function editSub(c, s) {
       var f = App.form([
-        { key: "name", label: "订阅名称", full: true, placeholder: "如：消防工程、医疗设备维保" },
-        { key: "keywords_include", label: "包含关键词（任一命中即可，逗号分隔）", full: true, hint: "建议写具体的业务词：如「消防, 消防设施, 火灾报警, 喷淋」" },
-        { key: "keywords_exclude", label: "排除关键词（标题含有就不推）", full: true, hint: "如「食堂, 物业, 车辆」" },
-        { key: "regions", label: "地区（省/市名，逗号分隔，留空不限）", full: true },
+        { key: "keywords_include", label: "抓取关键词（命中任意一个就推荐给你，逗号分隔）", full: true, placeholder: "如：农药, 化肥, 种子, 农资, 植保", hint: "写成你实际卖的东西和业务说法，越具体越准" },
+        { key: "keywords_exclude", label: "排除词（标题里含有就不推荐）", full: true, placeholder: "如：物业, 食堂, 装修", hint: "用来去掉明显不相干的公告" },
+        { key: "notice_types", label: "只看这类公告", type: "select", options: [["tender", "只看招标/采购公告"], ["tender,change", "招标 + 更正澄清"], ["tender,change,award,fail,intention", "全部类型（含中标、废标、采购意向）"]] },
+        { key: "regions", label: "只看这些地区（省/市名，逗号分隔，留空不限）", full: true, placeholder: "如：湖北, 湖南, 江西", hint: "填了之后只推这些地方的公告；留空表示全国都推" },
+        { key: "enabled", label: "启用抓取", type: "checkbox", default: true }
+      ], s || { enabled: 1, notice_types: "tender" });
+      var adv = App.form([
+        { key: "name", label: "名称", full: true, placeholder: "如：农资采购" },
         { key: "categories", label: "品目关键词（如：货物, 工程）" },
-        { key: "purchaser_keywords", label: "采购人关键词（如：医院, 学校）" },
+        { key: "purchaser_keywords", label: "采购人关键词（如：农业农村局, 供销社）" },
         { key: "budget_min", label: "预算下限（万元）", type: "number" },
-        { key: "budget_max", label: "预算上限（万元）", type: "number" },
-        { key: "notice_types", label: "公告类型", type: "select", options: [["tender", "只看招标/采购公告"], ["tender,change", "招标 + 更正"], ["tender,intention", "招标 + 采购意向"], ["tender,change,award,fail,intention", "全部类型"]] },
-        { key: "enabled", label: "启用", type: "checkbox", default: true }
-      ], s || { enabled: 1 });
-      App.modal({ title: (s ? "编辑订阅 · " : "新增订阅 · ") + (c.short_name || c.name), wide: true, body: f.el, buttons: [
+        { key: "budget_max", label: "预算上限（万元）", type: "number" }
+      ], s || {});
+      var body = h("div", null, f.el,
+        h("details", { style: { marginTop: "6px" } },
+          h("summary", { class: "small muted", style: { cursor: "pointer" } }, "更多筛选条件（名称 / 地区 / 品目 / 采购人 / 预算，可选）"),
+          h("div", { style: { marginTop: "12px" } }, adv.el)));
+      App.modal({ title: (s ? "编辑关键词 · " : "新增关键词 · ") + (c.short_name || c.name), wide: true, body: body, buttons: [
         s ? { text: "删除", danger: true, onClick: function () { return App.del("/api/subscriptions/" + s.id).then(load); } } : null,
         { text: "取消" },
         { text: "保存", primary: true, onClick: function () {
-          var v = f.values(); v.company_id = c.id;
+          var v = {}, k;
+          var a = f.values(), b = adv.values();
+          for (k in b) v[k] = b[k];
+          for (k in a) v[k] = a[k];
+          v.company_id = c.id;
+          if (!v.name) v.name = "关键词订阅";
           var pr = s ? App.put("/api/subscriptions/" + s.id, v) : App.post("/api/subscriptions", v);
           return pr.then(function () { App.toast("已保存。点「用最近 7 天公告重新匹配」可以立即看到效果", "ok"); load(); });
         } }].filter(Boolean) });

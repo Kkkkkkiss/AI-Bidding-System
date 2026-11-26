@@ -341,6 +341,10 @@ def match_notice(notice_id: int, *, companies: list[dict] | None = None, use_ai:
         sub, score, reasons, hits = best
         lib = library_summary(comp["id"])
         level, q_reasons, missing = rule_qualification(notice, lib)
+        # 资料库里一条资质/人员/业绩都没有时，规则判出来的「不能投」没有依据，
+        # 不参与打分（否则关键词命中的公告会被压到推不出去）
+        if not (lib.get("quals") or lib.get("people") or lib.get("perfs")):
+            level, q_reasons, missing = "待评估", [], []
         level_by = "rule"
         if use_ai and llm.enabled() and notice["notice_type"] == "tender":
             try:

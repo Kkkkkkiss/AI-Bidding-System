@@ -83,16 +83,43 @@ def update_company(cid: int, payload: dict = Body(...), user: dict = Depends(req
     return db.get("companies", cid)
 
 
+PROJECT_STATUS_LABEL = {
+    "evaluating": "待评估", "preparing": "准备中", "reviewing": "审核中",
+    "ready": "待投递", "submitted": "已投递", "opened": "已开标",
+    "won": "已中标", "lost": "未中标", "abandoned": "已放弃",
+}
+
+
+def _purge_company_projects(cid: int) -> int:
+    """连带删除该主体下的投标项目及其标书/招标文件/事件记录，返回删掉的项目数。"""
+    pids = [r["id"] for r in db.q("SELECT id FROM projects WHERE company_id = ?", (cid,))]
+    for pid in pids:
+        for d in db.q("SELECT id FROM bid_docs WHERE project_id = ?", (pid,)):
+            for s in db.q("SELECT id FROM bid_sections WHERE doc_id = ?", (d["id"],)):
+                db.ex("DELETE FROM section_versions WHERE section_id = ?", (s["id"],))
+            db.ex("DELETE FROM bid_sections WHERE doc_id = ?", (d["id"],))
+            db.ex("DELETE FROM checks WHERE doc_id = ?", (d["id"],))
+        db.ex("DELETE FROM bid_docs WHERE project_id = ?", (pid,))
+        db.ex("DELETE FROM tender_docs WHERE project_id = ?", (pid,))
+        db.ex("DELETE FROM project_events WHERE project_id = ?", (pid,))
+        db.ex("DELETE FROM projects WHERE id = ?", (pid,))
+    return len(pids)
+
+
 @router.delete("/companies/{cid}")
-def delete_company(cid: int, user: dict = Depends(require("admin"))):
+def delete_company(cid: int, force: int = 0, user: dict = Depends(require("admin"))):
     must(db.get("companies", cid), "主体")
-    if db.scalar("SELECT COUNT(*) FROM projects WHERE company_id = ?", (cid,)):
-        raise HTTPException(400, "该主体下还有投标项目，不能删除")
+    rows = db.q("SELECT status, COUNT(*) AS n FROM projects WHERE company_id = ? GROUP BY status", (cid,))
+    total = sum(r["n"] for r in rows)
+    if total and not force:
+        detail = "、".join(f"{PROJECT_STATUS_LABEL.get(r['status'], r['status'])} {r['n']} 个" for r in rows)
+        raise HTTPException(400, f"该主体下还有 {total} 个投标项目（{detail}）。确认要连同项目和标书一起删除，请再确认一次。")
+    removed = _purge_company_projects(cid) if total else 0
     for t in ("library_items", "subscriptions", "matches", "platform_accounts"):
         db.ex(f"DELETE FROM {t} WHERE company_id = ?", (cid,))
     db.ex("DELETE FROM companies WHERE id = ?", (cid,))
-    db.audit(user, "删除主体", str(cid))
-    return {"ok": True}
+    db.audit(user, "删除主体", f"{cid}，连带项目 {removed} 个")
+    return {"ok": True, "projects_deleted": removed}
 
 
 # ---------------------------------------------------------------- 文件
@@ -364,14 +391,22 @@ def preview_sub(sid: int, user: dict = Depends(current_user)):
 
 @router.post("/subscriptions/rematch")
 def rematch(payload: dict = Body(default={}), user: dict = Depends(require("manager", "sales"))):
-    """订阅改了之后，对最近 N 天的标讯重新匹配。"""
+    """订阅改了之后，对最近 N 天的标讯重新匹配。
+
+    同时清掉「改了关键词之后已经不该命中」的旧匹配，否则列表里会留着过期结果；
+    仍然命中的匹配保留原样，收藏/忽略/指派状态不会丢。
+    """
     days = int(payload.get("days") or 7)
     since = (now() - timedelta(days=days)).strftime("%Y-%m-%d")
     rows = db.q("SELECT id FROM notices WHERE created_at >= ? AND dup_of IS NULL", (since,))
     companies = db.q("SELECT * FROM companies")
     n = 0
     for r in rows:
-        n += len(matching.match_notice(r["id"], companies=companies))
+        keep = {m["company_id"] for m in matching.match_notice(r["id"], companies=companies)}
+        for e in db.q("SELECT id, company_id FROM matches WHERE notice_id = ?", (r["id"],)):
+            if e["company_id"] not in keep:
+                db.ex("DELETE FROM matches WHERE id = ?", (e["id"],))
+        n += len(keep)
     return {"scanned": len(rows), "matched": n}
 
 

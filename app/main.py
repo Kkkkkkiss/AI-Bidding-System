@@ -64,6 +64,9 @@ async def security_headers(request: Request, call_next):
     resp.headers.setdefault("Referrer-Policy", "same-origin")
     if request.url.path.startswith("/api/"):
         resp.headers.setdefault("Cache-Control", "no-store")
+    elif request.url.path.startswith("/static/"):
+        # 静态资源每次都要向服务端确认，改完代码刷新就能看到，不会被浏览器拿旧副本
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
     return resp
 
 

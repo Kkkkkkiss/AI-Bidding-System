@@ -43,6 +43,21 @@
         if (s.paused_until) tools.appendChild(h("button", { class: "btn sm", on: { click: function () { App.put("/api/sources/" + s.id, { resume: true }).then(load); } } }, "解除暂停"));
         tools.appendChild(h("button", { class: "btn sm", on: { click: function () { configDialog(s); } } }, "设置"));
       }
+      if (App.can("manager", "sales")) tools.appendChild(h("button", { class: "btn sm", on: { click: function (e) {
+        var b = e.currentTarget; App.busy(b, true, "测试中");
+        App.post("/api/sources/" + s.id + "/test").then(function (r) {
+          App.busy(b, false);
+          App.modal({
+            title: "测试连接：" + s.name,
+            body: h("div", null,
+              h("p", { style: { color: r.ok ? "var(--ok)" : "var(--seal)", fontWeight: "500" } }, (r.ok ? "✅ " : "❌ ") + (r.message || "")),
+              h("p", { class: "small muted" }, "耗时 " + r.seconds + " 秒" + (r.found ? "，解析到 " + r.found + " 条" : "")),
+              r.sample && r.sample.length ? h("ul", null, r.sample.map(function (t) { return h("li", { class: "small" }, t); })) : null,
+              r.ok ? null : h("p", { class: "small muted" }, "测试只发一两个请求。如果这里就失败，正式采集也一定失败——先看是不是被限频、改版或 robots 拦截。")),
+            buttons: [{ text: "知道了", primary: true }]
+          });
+        }, function () { App.busy(b, false); });
+      } } }, "测试"));
       if (App.can("manager", "sales")) tools.appendChild(h("button", { class: "btn sm primary", on: { click: function () {
         App.runJob("采集：" + s.name, App.post("/api/sources/" + s.id + "/run")).then(function (j) { App.toast((j.result && j.result.message) || "完成", "ok"); load(); });
       } } }, "立即运行"));
@@ -65,31 +80,34 @@
           { key: "max_pages", label: "每个栏目最多翻页（每页 20 条，站点最多 25 页）", type: "number" },
           { key: "lookback_days", label: "只采集最近几天的公告", type: "number" },
           { key: "interval", label: "请求间隔（秒，建议 ≥ 3）", type: "number" },
-          { key: "max_details", label: "单次最多抓取详情数", type: "number", default: 300 }
+          { key: "max_details", label: "单次最多抓取详情数", type: "number", default: 300 },
+          { key: "every_hours", label: "每几小时跑一次（0 = 每轮都跑）", type: "number", default: 1 }
         ], cfg);
         body = h("div", null, h("h4", null, "采集栏目"), h("div", { class: "row" }, boxes), h("div", { class: "mt" }, f.el));
         collect = function () {
           var v = f.values();
-          return { channels: boxes.map(function (b) { return b.querySelector("input"); }).filter(function (c) { return c.checked; }).map(function (c) { return c.dataset.k; }), max_pages: +v.max_pages || 25, lookback_days: +v.lookback_days || 3, interval: Math.max(2, +v.interval || 4), max_details: +v.max_details || 300 };
+          return { channels: boxes.map(function (b) { return b.querySelector("input"); }).filter(function (c) { return c.checked; }).map(function (c) { return c.dataset.k; }), max_pages: +v.max_pages || 25, lookback_days: +v.lookback_days || 3, interval: Math.max(2, +v.interval || 4), max_details: +v.max_details || 300, every_hours: +v.every_hours || 0 };
         };
       } else if (s.type === "ccgp_search") {
         var f2 = App.form([
           { key: "days", label: "搜索最近几天", type: "number" },
           { key: "pages", label: "每个关键词取几页（每页 20 条）", type: "number" },
           { key: "max_keywords", label: "每次最多搜索几个关键词", type: "number" },
-          { key: "interval", label: "请求间隔（秒，最少 20，建议 40）", type: "number" }
+          { key: "interval", label: "请求间隔（秒，最少 20，建议 40）", type: "number" },
+          { key: "every_hours", label: "每几小时跑一次（0 = 每轮都跑）", type: "number", default: 6 }
         ], cfg);
         body = h("div", null, h("p", { class: "small muted" }, "关键词取自所有启用订阅的「包含关键词」。该站搜索限频很严，请保持低频。"), f2.el);
-        collect = function () { var v = f2.values(); return { days: +v.days || 2, pages: +v.pages || 1, max_keywords: +v.max_keywords || 6, interval: Math.max(20, +v.interval || 40), bid_type: cfg.bid_type || "1" }; };
+        collect = function () { var v = f2.values(); return { days: +v.days || 2, pages: +v.pages || 1, max_keywords: +v.max_keywords || 6, interval: Math.max(20, +v.interval || 40), bid_type: cfg.bid_type || "1", every_hours: +v.every_hours || 0 }; };
       } else if (s.type === "ggzy") {
         var f3 = App.form([
           { key: "classify", label: "业务类型", type: "select", options: [["02,01", "政府采购 + 工程建设"], ["02", "仅政府采购"], ["01", "仅工程建设"]] },
           { key: "max_pages", label: "每类最多翻页", type: "number" },
           { key: "interval", label: "请求间隔（秒，最少 15）", type: "number" },
-          { key: "keyword", label: "关键词（可选）" }
+          { key: "keyword", label: "关键词（可选）" },
+          { key: "every_hours", label: "每几小时跑一次（0 = 每轮都跑）", type: "number", default: 1 }
         ], Object.assign({}, cfg, { classify: (cfg.classify || ["02", "01"]).join(",") }));
         body = h("div", null, h("p", { class: "small muted" }, "实验性来源：该平台限频严格，可能要求图形验证码；遇到会自动暂停。"), f3.el);
-        collect = function () { var v = f3.values(); return { classify: v.classify.split(","), max_pages: +v.max_pages || 2, interval: Math.max(15, +v.interval || 30), keyword: v.keyword }; };
+        collect = function () { var v = f3.values(); return { classify: v.classify.split(","), max_pages: +v.max_pages || 2, interval: Math.max(15, +v.interval || 30), every_hours: +v.every_hours || 0, keyword: v.keyword }; };
       } else {
         customDialog(s);
         return;
@@ -97,7 +115,7 @@
       App.modal({ title: "来源设置：" + s.name, wide: true, body: body, buttons: [
         { text: "删除来源", danger: true, onClick: function () { return App.confirm("删除来源「" + s.name + "」？已采集的公告会保留。", "删除").then(function (ok) { if (ok) return App.del("/api/sources/" + s.id).then(load); return false; }); } },
         { text: "取消" },
-        { text: "保存", primary: true, onClick: function () { return App.put("/api/sources/" + s.id, { config: collect() }).then(function () { App.toast("已保存", "ok"); load(); }); } }
+        { text: "保存", primary: true, onClick: function () { return App.put("/api/sources/" + s.id, { config: Object.assign({}, s.config || {}, collect()) }).then(function () { App.toast("已保存", "ok"); load(); }); } }
       ] });
     }
     function customDialog(s) {
@@ -204,6 +222,7 @@
       var f = App.form([
         { key: "crawl_enabled", label: "启用定时采集", type: "checkbox", full: true },
         { key: "crawl_hours", label: "每天哪些整点采集（逗号分隔）", full: true, hint: "政府采购网地方公开招标栏目更新很快，建议工作时间每 1~2 小时一次" },
+        { key: "crawl_minute_step", label: "每个整点内隔几分钟跑一次", type: "number", hint: "15 = 每小时 4 次（配合前面的整点列表）；填 60 就退回每小时一次" },
         { key: "crawl_detail_policy", label: "详情抓取策略", type: "select", options: [["matched", "只抓标题命中订阅的（推荐，请求少）"], ["all", "全部抓取（更全，请求多）"], ["none", "不抓详情"]] },
         { key: "crawl_lookback_days", label: "采集最近几天", type: "number" },
         { key: "crawl_keep_days", label: "未关注公告保留天数", type: "number" },
@@ -234,7 +253,8 @@
         { key: "notify_dingtalk_webhook", label: "钉钉群机器人 Webhook", full: true, type: "password" },
         { key: "notify_dingtalk_secret", label: "钉钉加签密钥（可选）", full: true, type: "password" },
         { key: "notify_feishu_webhook", label: "飞书群机器人 Webhook", full: true, type: "password" },
-        { key: "notify_feishu_secret", label: "飞书签名校验密钥（可选）", full: true, type: "password" }
+        { key: "notify_feishu_secret", label: "飞书签名校验密钥（可选）", full: true, type: "password" },
+        { key: "notify_min_score", label: "即时推送门槛（分，达到就推；填 0 表示命中就推）", type: "number", hint: "分数只反映关键词命中程度；门槛越高越省心，但可能漏掉边缘机会" }
       ], s);
       content.appendChild(App.panel("群机器人推送", h("div", null,
         h("p", { class: "small muted" }, "配置后，系统会推送：新匹配到的标讯、每日早报、截止节点提醒、证书/CA 到期提醒。在群设置里添加「自定义机器人」即可拿到 Webhook 地址。钉钉若设置了关键词安全校验，请把关键词设为「标讯」。"),

@@ -8,10 +8,6 @@
   var ROUTES = (App.routes = {});
   var ACTS = (App.acts = {});
 
-  // 开发者署名水印（侧栏底部、登录页、退出页）
-  var DEV_MARK = "@赛博老爸 cyberdaddy";
-  function devMark() { return h("div", { class: "dev-mark", title: "开发者" }, DEV_MARK); }
-
   // ------------------------------------------------------------ DOM
   function h(tag, attrs) {
     var el = document.createElement(tag);
@@ -404,18 +400,15 @@
   var NAV = [
     { grp: "日常" },
     { hash: "#/dashboard", label: "工作台" },
-    { hash: "#/notices", label: "标讯中心", badge: "matches" },
-    { hash: "#/projects", label: "投标项目" },
-    { grp: "资料" },
-    { hash: "#/library", label: "企业资料库" },
-    { hash: "#/companies", label: "主体与订阅" },
-    { hash: "#/accounts", label: "平台账号与 CA" },
-    { grp: "管理" },
-    { hash: "#/stats", label: "数据看板" },
+    { hash: "#/notices", label: "招标信息", badge: "matches" },
+    { grp: "设置" },
+    { hash: "#/companies", label: "公司与关键词" },
     { hash: "#/sources", label: "采集来源" },
     { hash: "#/settings", label: "系统设置", roles: ["admin"] }
   ];
-  var TITLES = { dashboard: "工作台", notices: "标讯中心", projects: "投标项目", library: "企业资料库", companies: "主体与订阅", accounts: "平台账号与 CA 台账", stats: "数据看板", sources: "采集来源", settings: "系统设置" };
+  var TITLES = { dashboard: "工作台", notices: "招标信息", companies: "公司与关键词", sources: "采集来源", settings: "系统设置" };
+  // 精简版只保留「采集 → 关键词匹配 → 推送」这一条主线，其余页面统一跳回招标信息
+  var ALLOWED = { dashboard: 1, notices: 1, companies: 1, sources: 1, settings: 1 };
 
   var shell = {};
   function renderShell() {
@@ -437,9 +430,9 @@
     shell.main = h("main", { class: "main", id: "main" });
     root.appendChild(h("div", { class: "app" },
       h("aside", { class: "side" },
-        h("div", { class: "brand" }, h("b", null, STATE.systemName), h("small", null, "找标 · 读标 · 写标 · 管投标")),
+        h("div", { class: "brand" }, h("b", null, STATE.systemName), h("small", null, "每天找到你能投的标")),
         nav,
-        h("div", { class: "side-foot" }, h("div", null, STATE.desktop ? "本机版 · 数据只保存在这台电脑" : "数据存放在本机/内网服务器"), devMark())),
+        h("div", { class: "side-foot" }, h("div", null, STATE.desktop ? "本机版 · 数据只保存在这台电脑" : "数据存放在本机/内网服务器"))),
       h("div", null,
         h("header", { class: "top" }, shell.title, h("span", { class: "grow" }), bell, userBtn),
         shell.main)));
@@ -499,7 +492,7 @@
           if (!ok) return false;
           return App.post("/api/desktop/quit").then(function () {
             var root = App.clear(document.getElementById("root"));
-            root.appendChild(h("div", { class: "login-wrap" }, h("div", { class: "login" }, h("h2", null, "已退出"), h("p", { class: "muted" }, "AI投标系统已停止运行，可以关闭这个页面了。下次双击「AI投标系统」即可重新打开。")), devMark()));
+            root.appendChild(h("div", { class: "login-wrap" }, h("div", { class: "login" }, h("h2", null, "已退出"), h("p", { class: "muted" }, "AI投标系统已停止运行，可以关闭这个页面了。下次双击「AI投标系统」即可重新打开。"))));
           });
         });
       } });
@@ -525,6 +518,7 @@
   function route() {
     if (!STATE.me) return;
     var r = App.parseHash();
+    if (!ALLOWED[r.page]) { location.hash = "#/notices"; return; }
     if (shell.notes) { shell.notes.remove(); shell.notes = null; }
     // 切换页面时关闭残留的抽屉和弹窗（不触发它们的关闭回调）
     Array.prototype.forEach.call(document.querySelectorAll(".drawer, .mask, .modal"), function (x) { x.remove(); });
@@ -561,7 +555,7 @@
       }, function () { busy(btn, false); });
     });
     var root = clear(document.getElementById("root"));
-    root.appendChild(h("div", { class: "login-wrap" }, form, devMark()));
+    root.appendChild(h("div", { class: "login-wrap" }, form));
     setTimeout(function () { user.focus(); }, 30);
     App.get("/api/health", { quiet: true }).then(function (d) {
       if (d && d.desktop) {

@@ -514,6 +514,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # 采集
     "crawl_enabled": True,
     "crawl_hours": "8,9,10,11,12,13,14,15,16,17,18,19,20,22",   # 每天哪些整点运行采集（地方公开招标栏目更新很快）
+    "crawl_minute_step": 15,          # 每个整点内隔多少分钟跑一次（15 = 每小时 4 次；60 = 退回整点一次）
     "crawl_respect_robots": True,
     "crawl_user_agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -530,6 +531,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "notify_dingtalk_secret": "",
     "notify_feishu_webhook": "",
     "notify_feishu_secret": "",
+    "notify_min_score": 50,           # 新命中的公告达到多少分就即时推送（0 = 只要命中就推）
     "digest_top_n": 15,
     "remind_days": "7,3,1",
     "expire_warn_days": 30,

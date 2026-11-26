@@ -3,57 +3,135 @@
   "use strict";
   var h = App.h;
   var TYPES = [["", "全部类型"], ["tender", "招标/采购"], ["change", "更正/澄清"], ["award", "中标/成交"], ["fail", "废标/终止"], ["intention", "采购意向"], ["other", "其他"]];
-  var filters = { company_id: 0, only_matched: 1, level: "", status: "", notice_type: "tender", region: "", q: "", hide_expired: 1, sort: "score", page: 1 };
+  var REGIONS = ["", "北京", "天津", "河北", "山西", "内蒙古", "辽宁", "吉林", "黑龙江", "上海", "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南", "湖北", "湖南", "广东", "广西", "海南", "重庆", "四川", "贵州", "云南", "西藏", "陕西", "甘肃", "青海", "宁夏", "新疆", "台湾", "香港", "澳门", "跨省"];
+  var REGION_OPTS = REGIONS.map(function (r) { return [r, r || "全部地区"]; });
+  var filters = { company_id: 0, only_matched: 1, level: "", status: "", notice_type: "", region: "", q: "", hide_expired: 1, sort: "score", page: 1 };
 
   App.routes.notices = function (main, r) {
     if (r.q.all) { filters.only_matched = 0; filters.sort = "publish"; }
     var listBox = h("div", { class: "nlist" });
     var pager = h("div", { class: "row", style: { padding: "10px 16px" } });
     var totalEl = h("span", { class: "muted small" });
+    var picked = {};      // 勾选的公告 id，跨分页保留
+    var lastItems = [];   // 当前页的数据
+    var lastTotal = 0;    // 当前筛选的总条数
 
     var q = h("input", { type: "text", placeholder: "搜索标题 / 采购人 / 项目编号", value: filters.q });
-    var region = h("input", { type: "text", placeholder: "地区", value: filters.region });
-    var level = sel([["", "全部结论"], ["能投", "能投"], ["差一项", "差一项"], ["待评估", "待评估"], ["不能投", "不能投"]], filters.level);
-    var status = sel([["", "未忽略的"], ["new", "未处理"], ["fav", "已收藏"], ["project", "已立项"], ["ignored", "已忽略"]], filters.status);
+    var region = sel(REGION_OPTS, filters.region);
+    var status = sel([["", "未忽略的"], ["new", "未处理"], ["fav", "已收藏"], ["ignored", "已忽略"]], filters.status);
     var type = sel(TYPES, filters.notice_type);
     var scope = sel([["1", "只看匹配的"], ["0", "全部公告"]], String(filters.only_matched));
     var sort = sel([["score", "按匹配度"], ["publish", "按发布时间"], ["deadline", "按截止时间"], ["budget", "按预算"]], filters.sort);
     var exp = h("input", { type: "checkbox", checked: !!filters.hide_expired });
     var go = h("button", { class: "btn primary" }, "筛选");
 
-    var bar = h("div", { class: "filters" }, q, region, level, status, type, scope, go);
+    var bar = h("div", { class: "filters" }, q, region, status, type, scope, go);
+    // 批量操作条
+    var pickAll = h("input", { type: "checkbox" });
+    var pickInfo = h("span", { class: "muted small" }, "未选择");
+    var delBtn = h("button", { class: "btn danger sm", disabled: true, on: { click: deletePicked } }, "删除选中");
+    var purgeBtn = h("button", { class: "btn danger sm", on: { click: purgeFiltered } }, "按当前筛选全删");
+    var actBar = h("div", { class: "pickbar" },
+      h("label", { class: "chk" }, pickAll, "全选本页"),
+      pickInfo,
+      h("span", { class: "spacer" }),
+      App.can("admin", "manager") ? delBtn : null,
+      App.can("admin") ? purgeBtn : null);
+    pickAll.addEventListener("change", function () {
+      lastItems.forEach(function (n) { if (pickAll.checked) picked[n.id] = true; else delete picked[n.id]; });
+      syncPick();
+      lastItems.forEach(function (n) {
+        var el = listBox.querySelector('[data-nid="' + n.id + '"]');
+        if (el) el.classList.toggle("picked", !!picked[n.id]);
+      });
+    });
+
+    function pickCount() { return Object.keys(picked).length; }
+    function syncPick() {
+      var n = pickCount();
+      pickInfo.textContent = n ? ("已选 " + n + " 条") : "未选择";
+      delBtn.disabled = !n;
+      delBtn.textContent = n ? ("删除选中（" + n + "）") : "删除选中";
+      var all = lastItems.length > 0 && lastItems.every(function (x) { return picked[x.id]; });
+      pickAll.checked = all;
+      pickAll.indeterminate = !all && lastItems.some(function (x) { return picked[x.id]; });
+    }
+    function togglePick(id, on) {
+      if (on) picked[id] = true; else delete picked[id];
+      syncPick();
+      var el = listBox.querySelector('[data-nid="' + id + '"]');
+      if (el) el.classList.toggle("picked", !!on);
+    }
+    function deletePicked() {
+      var ids = Object.keys(picked).map(Number);
+      if (!ids.length) return;
+      App.confirm("将从标讯中心删除选中的 " + ids.length + " 条公告，连同它们的匹配记录和原文快照。已经立项的公告会自动跳过。删除后不可恢复。", "删除 " + ids.length + " 条").then(function (ok) {
+        if (!ok) return;
+        App.post("/api/notices/bulk_delete", { ids: ids }).then(function (d) {
+          picked = {};
+          App.toast("已删除 " + d.deleted + " 条" + (d.skipped ? "，跳过已立项 " + d.skipped + " 条" : ""), "ok");
+          load();
+        });
+      });
+    }
+    function purgeFiltered() {
+      if (!lastTotal) { App.toast("当前筛选没有可删除的公告", "err"); return; }
+      var inp = h("input", { type: "text", placeholder: "在这里输入 " + lastTotal });
+      App.modal({
+        title: "删除当前筛选的全部 " + lastTotal + " 条",
+        body: h("div", null,
+          h("p", { class: "req" }, "这个操作不可恢复。会连同匹配记录和原文快照一起删掉，已立项的公告自动跳过。"),
+          h("p", { class: "small muted" }, "如果确实要删，请在下面输入条数 " + lastTotal + " 后再点删除。"),
+          inp),
+        buttons: [
+          { text: "取消" },
+          { text: "全部删除", danger: true, onClick: function () {
+            if (String(inp.value).trim() !== String(lastTotal)) {
+              App.toast("输入的条数不对，没有删除任何东西", "err");
+              return false;
+            }
+            return App.post("/api/notices/purge", { filter: filters }).then(function (d) {
+              picked = {};
+              App.toast("已删除 " + d.deleted + " 条" + (d.skipped ? "，跳过已立项 " + d.skipped + " 条" : ""), "ok");
+              load();
+            });
+          } }
+        ]
+      });
+    }
     var bar2 = h("div", { class: "row", style: { padding: "0 16px 12px", borderBottom: "1px solid var(--line-2)" } },
-      "主体", App.companySelect(filters.company_id, function (v) { filters.company_id = v; filters.page = 1; load(); }, true),
       "排序", sort,
       h("label", { class: "chk" }, exp, "隐藏已截止"),
       h("span", { class: "spacer" }), totalEl,
       h("button", { class: "btn", on: { click: importDialog } }, "导入公告"),
       App.can("manager", "sales") ? h("button", { class: "btn", on: { click: runCrawl } }, "立即采集") : null);
-    [sort, level, status, type, scope].forEach(function (s) { s.addEventListener("change", apply); });
+    [sort, status, type, scope, region].forEach(function (s) { s.addEventListener("change", apply); });
     exp.addEventListener("change", apply);
     go.addEventListener("click", apply);
     q.addEventListener("keydown", function (e) { if (e.key === "Enter") apply(); });
-    region.addEventListener("keydown", function (e) { if (e.key === "Enter") apply(); });
 
     function apply() {
-      filters.q = q.value.trim(); filters.region = region.value.trim(); filters.level = level.value; filters.status = status.value;
+      filters.q = q.value.trim(); filters.region = region.value.trim(); filters.status = status.value;
       filters.notice_type = type.value; filters.only_matched = +scope.value; filters.sort = sort.value; filters.hide_expired = exp.checked ? 1 : 0; filters.page = 1;
       load();
     }
 
-    main.appendChild(h("div", { class: "panel" }, bar, bar2, listBox, pager));
+    main.appendChild(h("div", { class: "panel" }, bar, bar2, actBar, listBox, pager));
 
     function load() {
       App.clear(listBox).appendChild(App.empty("加载中…"));
       App.get("/api/notices" + App.qs(filters)).then(function (d) {
         App.clear(listBox);
         totalEl.textContent = "共 " + d.total + " 条";
+        lastItems = d.items || [];
+        lastTotal = d.total || 0;
+        syncPick();
         if (!d.items.length) {
           listBox.appendChild(filters.only_matched
-            ? App.empty("没有匹配的标讯", "可能还没到采集时间，或订阅关键词太窄。可以切换到「全部公告」看看今天采到了什么。", h("a", { class: "btn", href: "#/companies" }, "调整订阅"))
+            ? App.empty("没有符合关键词的招标信息", "可能还没到采集时间，或者关键词太窄。可以切到「全部公告」看看今天抓到了什么。", h("a", { class: "btn", href: "#/companies" }, "调整关键词"))
             : App.empty("还没有采集到公告", "到「采集来源」点一次「立即采集」，或用「导入公告」粘贴链接"));
         }
-        d.items.forEach(function (n) { listBox.appendChild(row(n, load)); });
+        d.items.forEach(function (n) { listBox.appendChild(row(n, load, picked, togglePick)); });
         App.clear(pager);
         var pages = Math.ceil(d.total / d.size);
         if (pages > 1) {
@@ -71,7 +149,14 @@
     return h("select", null, opts.map(function (o) { return h("option", { value: o[0], selected: String(val) === String(o[0]) }, o[1]); }));
   }
 
-  function row(n, reload) {
+  // 只看关键词命中理由，过滤掉投标资格比对相关的话术
+  function cleanReasons(m) {
+    return ((m && m.reasons) || []).filter(function (r) {
+      return r.indexOf("资格") < 0 && r.indexOf("尚") < 0 && r.indexOf("本主体未标记") < 0 && r.indexOf("专门面向中小企业") < 0;
+    });
+  }
+
+  function row(n, reload, picked, onPick) {
     var m = n.match;
     var meta = h("div", { class: "meta" },
       h("span", { class: "tag line" }, n.type_label || n.type_name),
@@ -80,17 +165,24 @@
       n.budget ? h("span", null, "预算 " + App.fmtAmount(n.budget)) : null,
       h("span", null, "发布 " + (n.publish_time || "").slice(0, 16)),
       h("span", null, n.source_name));
-    var why = m && m.reasons && m.reasons.length ? h("div", { class: "why" }, App.short(m.reasons.slice(0, 2).join("；"), 110)) : null;
-    var miss = m && m.missing && m.missing.length ? h("div", { class: "why", style: { color: "var(--seal)" } }, "缺：" + App.short(m.missing.join("、"), 90)) : null;
+    var rs = cleanReasons(m);
+    var why = rs.length ? h("div", { class: "why" }, App.short(rs.slice(0, 2).join("；"), 110)) : null;
     var right = h("div", { class: "side-r" });
     if (m) {
       right.appendChild(h("div", { class: "score" }, String(Math.round(m.score)), h("small", null, " 分")));
-      right.appendChild(App.level(m.level, m.level_by));
-      right.appendChild(h("span", { class: "small muted" }, m.company_name + (m.status === "fav" ? " · 已收藏" : m.status === "project" ? " · 已立项" : m.status === "ignored" ? " · 已忽略" : "")));
+      right.appendChild(h("span", { class: "small muted" }, m.status === "fav" ? "已收藏" : m.status === "ignored" ? "已忽略" : ""));
     }
-    return h("div", { class: "nitem" + (m && m.status !== "new" ? " read" : ""), on: { click: function () { history.replaceState(null, "", "#/notices/" + n.id); openNotice(n.id, reload); } } },
+    var isPicked = !!(picked && picked[n.id]);
+    var cb = h("input", {
+      type: "checkbox", checked: isPicked,
+      title: "选中后可以批量删除",
+      on: { click: function (e) { e.stopPropagation(); if (onPick) onPick(n.id, e.currentTarget.checked); } }
+    });
+    var pickCell = h("span", { class: "pick", on: { click: function (e) { e.stopPropagation(); } } }, cb);
+    return h("div", { class: "nitem selectable" + (isPicked ? " picked" : "") + (m && m.status !== "new" ? " read" : ""), "data-nid": n.id, on: { click: function () { history.replaceState(null, "", "#/notices/" + n.id); openNotice(n.id, reload); } } },
+      pickCell,
       App.seal(n.notice_type === "tender" ? n.deadline : ""),
-      h("div", null, h("div", { class: "title" }, n.title), meta, why, miss),
+      h("div", null, h("div", { class: "title" }, n.title), meta, why),
       right);
   }
 
@@ -125,14 +217,9 @@
         show(tab);
 
         var m = n.matches.filter(function (x) { return !App.state.cid || x.company_id === App.state.cid; })[0] || n.matches[0];
-        if (n.projects.length) {
-          n.projects.forEach(function (p) { foot.appendChild(h("a", { class: "btn primary", href: "#/projects/" + p.id }, "打开项目：" + App.companyName(p.company_id))); });
-        }
-        if (App.can("manager", "sales", "writer")) foot.appendChild(h("button", { class: "btn" + (n.projects.length ? "" : " primary"), on: { click: function () { createProject(n, m); } } }, "立项准备投标"));
         if (m) {
           foot.appendChild(h("button", { class: "btn", on: { click: function () { setStatus(m.id, m.status === "fav" ? "new" : "fav").then(render); } } }, m.status === "fav" ? "取消收藏" : "收藏"));
           foot.appendChild(h("button", { class: "btn", on: { click: function () { setStatus(m.id, m.status === "ignored" ? "new" : "ignored").then(function () { dr.close(); }); } } }, m.status === "ignored" ? "取消忽略" : "不感兴趣"));
-          foot.appendChild(h("button", { class: "btn", on: { click: function () { assign(m); } } }, "指派给同事"));
         }
         foot.appendChild(h("span", { class: "spacer" }));
         if (n.url.indexOf("manual://") !== 0) foot.appendChild(h("button", { class: "btn", on: { click: function (e) {
@@ -160,18 +247,19 @@
       box.appendChild(h("h4", null, "资格要求（公告原文）"));
       box.appendChild(h("div", { class: "req" }, n.qualification_text.replace(/\n{2,}/g, "\n")));
     }
-    box.appendChild(h("h4", null, "与各投标主体的匹配"));
-    if (!n.matches.length) box.appendChild(App.empty("没有命中任何主体的订阅", "可以直接「立项准备投标」，或调整订阅关键词"));
+    box.appendChild(h("h4", null, "命中情况"));
+    if (!n.matches.length) box.appendChild(App.empty("没有命中你设置的关键词", "可以到「公司与关键词」补充关键词"));
     n.matches.forEach(function (m) {
-      var aiBtn = h("button", { class: "btn sm", on: { click: function (e) {
-        var b = e.currentTarget; App.busy(b, true, "AI 复核中");
-        App.post("/api/matches/" + m.id + "/ai_check").then(function () { App.toast("AI 复核完成", "ok"); rerender(); }, function () { App.busy(b, false); });
-      } } }, "AI 复核资格");
+      var kws = m.keyword_hits;
+      if (Array.isArray(kws)) kws = kws.join("、");
+      else kws = String(kws || "").split(/[,，]/).filter(Boolean).join("、");
       box.appendChild(h("div", { class: "panel mt" },
-        h("div", { class: "hd" }, h("h3", null, m.company_short || m.company_name), App.level(m.level, m.level_by), h("span", { class: "muted small" }, Math.round(m.score) + " 分"), h("span", { class: "spacer" }), aiBtn),
+        h("div", { class: "hd" }, h("h3", null, Math.round(m.score) + " 分"), h("span", { class: "muted small" }, kws ? "命中：" + kws : "")),
         h("div", { class: "bd" },
-          m.reasons.length ? h("ul", { style: { margin: 0, paddingLeft: "18px" } }, m.reasons.map(function (r) { return h("li", null, r); })) : null,
-          m.missing.length ? h("div", { class: "mt", style: { color: "var(--seal)" } }, "缺少/不满足：" + m.missing.join("；")) : null)));
+          (function () {
+            var rs = cleanReasons(m);
+            return rs.length ? h("ul", { style: { margin: 0, paddingLeft: "18px" } }, rs.map(function (r) { return h("li", null, r); })) : null;
+          })())));
     });
     if (n.duplicates && n.duplicates.length) {
       box.appendChild(h("h4", null, "同一项目的其他转载"));
@@ -180,7 +268,6 @@
     if (n.attachments && n.attachments.length) {
       box.appendChild(h("h4", null, "公告附件"));
       box.appendChild(h("ul", null, n.attachments.map(function (a) { return h("li", null, h("a", { href: a.url, target: "_blank", rel: "noopener" }, a.name)); })));
-      box.appendChild(h("div", { class: "small muted" }, "立项后可在项目里一键下载附件并自动解析招标文件"));
     }
     return box;
   }

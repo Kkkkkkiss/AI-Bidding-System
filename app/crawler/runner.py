@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import threading
+import time
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
 from .. import db, llm, matching, notify
@@ -263,7 +264,7 @@ def run_source(source_id: int, *, trigger: str = "manual", log_cb=None) -> dict:
     max_details = int(cfg.get("max_details") or 300)
     subs = db.q("SELECT * FROM subscriptions WHERE enabled = 1")
     known = _known_urls()
-    fetcher = Fetcher(interval=float(cfg.get("interval") or 4))
+    fetcher = Fetcher(interval=float(cfg.get("interval") or 4), timeout=float(cfg.get("timeout") or 25))
     try:
         if src["type"] == "ccgp_list":
             it = ccgp.collect_list(cfg, fetcher, lambda u: u in known, log)
@@ -389,6 +390,75 @@ def test_custom_source(cfg: dict) -> dict:
     return {"count": len(items), "items": items[:15], "first_detail": detail}
 
 
+def test_source(src: dict) -> dict:
+    """轻量探测：只发 1~2 个请求，确认这个来源当前能不能采到东西。"""
+    cfg = db.jload(src.get("config_json"), {})
+    typ = src.get("type") or ""
+    if typ == "custom_list":
+        try:
+            r = test_custom_source(cfg)
+            return {"ok": r["count"] > 0, "found": r["count"], "seconds": 0,
+                    "message": f"列表页解析到 {r['count']} 条", "sample": [x["title"][:60] for x in r["items"][:3]]}
+        except (StopCrawl, RobotsDisallowed) as e:
+            return {"ok": False, "found": 0, "message": str(e), "seconds": 0}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "found": 0, "message": f"{type(e).__name__}: {e}", "seconds": 0}
+
+    t0 = time.time()
+    fetcher = Fetcher(interval=2.0, timeout=float(cfg.get("timeout") or 40))
+    items: list = []
+    try:
+        if typ == "ccgp_list":
+            ch = (cfg.get("channels") or ccgp.DEFAULT_CHANNELS)[0]
+            url = ccgp.list_url(ch, 1)
+            items = ccgp.parse_list(fetcher.get(url, interval=2), url)
+            msg = f"「{ccgp.CHANNELS.get(ch, {}).get('label', ch)}」第 1 页解析到 {len(items)} 条"
+        elif typ == "ccgp_search":
+            kws: list[str] = []
+            for s in db.q("SELECT keywords_include FROM subscriptions WHERE enabled = 1"):
+                for k in split_keywords(s["keywords_include"] or ""):
+                    if k not in kws:
+                        kws.append(k)
+            kw = kws[0] if kws else "采购"
+            end = now().strftime("%Y-%m-%d")
+            start = (now() - timedelta(days=int(cfg.get("days") or 7))).strftime("%Y-%m-%d")
+            url = ccgp.search_url(kw, start, end, 1, str(cfg.get("bid_type") or "1"))
+            items, total = ccgp.parse_search(fetcher.get(url, interval=2))
+            msg = f"关键词「{kw}」第 1 页 {len(items)} 条（该词共 {total} 条）"
+        elif typ == "ggzy":
+            cl = (cfg.get("classify") or ["02"])[0]
+            form = {
+                "SOURCE_TYPE": "1",
+                "DEAL_TIME": str(cfg.get("deal_time") or "02"),
+                "DEAL_CLASSIFY": cl,
+                "PAGENUMBER": "1",
+            }
+            r = fetcher.post_form(ggzy.API, form, headers={"Referer": ggzy.REFERER}, interval=2)
+            data = r.json()
+            code = data.get("code")
+            if code != 200:
+                return {"ok": False, "found": 0, "seconds": round(time.time() - t0, 1),
+                        "message": f"平台返回 {code}：{data.get('message')}"}
+            items = ggzy.parse_records(data)
+            msg = f"{ggzy.CLASSIFY.get(cl, cl)} 第 1 页 {len(items)} 条"
+        else:
+            return {"ok": False, "found": 0, "message": "未知来源类型：" + typ, "seconds": 0}
+        return {
+            "ok": len(items) > 0,
+            "found": len(items),
+            "seconds": round(time.time() - t0, 1),
+            "message": msg if items else msg + "（这一页没有公告，可能改版或被拦截）",
+            "sample": [it["title"][:60] for it in items[:3]],
+        }
+    except (StopCrawl, RobotsDisallowed) as e:
+        return {"ok": False, "found": 0, "message": str(e), "seconds": round(time.time() - t0, 1)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "found": 0, "seconds": round(time.time() - t0, 1),
+                "message": f"{type(e).__name__}: {e}"}
+    finally:
+        fetcher.close()
+
+
 # ---------------------------------------------------------------- 全量运行
 
 def run_all(trigger: str = "schedule") -> list[dict]:
@@ -396,10 +466,33 @@ def run_all(trigger: str = "schedule") -> list[dict]:
         return [{"skipped": "上一轮采集还在进行"}]
     try:
         out = []
-        for s in db.q("SELECT id, name FROM sources WHERE enabled = 1 ORDER BY id"):
+        for s in db.q("SELECT id, name, config_json, last_run_at FROM sources WHERE enabled = 1 ORDER BY id"):
+            cfg = db.jload(s.get("config_json"), {})
+            every = int(cfg.get("every_hours") or 0)
+            # 来源级频率：慢的源（比如关键词全站搜索）不必每小时都跑
+            if trigger == "schedule" and every > 0 and s.get("last_run_at"):
+                try:
+                    last = datetime.fromisoformat(s["last_run_at"])
+                except ValueError:
+                    last = None
+                if last and (now() - last).total_seconds() < every * 3600:
+                    out.append({"source": s["name"], "skipped": f"未到周期（每 {every} 小时跑一次）"})
+                    continue
             r = run_source(s["id"], trigger=trigger)
             r["source"] = s["name"]
             out.append(r)
+        # 补齐：最近 2 天入库、但没有任何匹配记录的公告，补算一次
+        # （删除公告、重采同一批、手工重跑等情况会让「公告在库里、匹配表里却缺」）
+        since = (now() - timedelta(days=2)).strftime("%Y-%m-%d")
+        for r in db.q(
+            "SELECT id FROM notices WHERE created_at >= ? AND dup_of IS NULL "
+            "AND id NOT IN (SELECT notice_id FROM matches)",
+            (since,),
+        ):
+            try:
+                matching.match_notice(r["id"])
+            except Exception:  # noqa: BLE001
+                pass
         auto_ai_check()
         notify.push_new_matches()
         return out
